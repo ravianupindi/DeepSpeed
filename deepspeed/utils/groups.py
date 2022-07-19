@@ -36,6 +36,10 @@ _EXPERT_PARALLEL_GROUP = {}
 _EXPERT_DATA_PARALLEL_GROUP = {}
 # dist world group needs to be cloned for some cases
 _WORLD_GROUP = None
+# Shard process group that the current rank belongs to
+_SHARD_PARALLEL_GROUP = None
+# Shard replica group that the current rank belongs to
+_SHARD_REPLICA_GROUP = None
 # global object to maintain mpu object if passed by a Megatron client
 mpu = None
 
@@ -387,3 +391,58 @@ def _get_data_parallel_rank():
     if mpu is not None:
         return mpu.get_data_parallel_rank()
     return dist.get_rank(group=_get_data_parallel_group())
+
+
+def _get_shard_groups(shard_replicas):
+    global mpu
+
+    rank = dist.get_rank()
+    dp_size = _get_data_parallel_world_size()
+    assert dp_size % shard_replicas == 0, "Another sanity check"
+    shard_pieces = dp_size // shard_replicas
+    shard_parallel_group = None
+    shard_replica_group = None
+
+    if mpu is not None:
+        topology = None
+        try:
+            topology = mpu.get_topology()
+        except AttributeError:
+            raise RuntimeError('mpu object must have access to topology')
+        assert topology, f"Topology must be passed to the mpu object"
+
+        dp_groups = topology.get_axis_comm_lists('data')
+        for dp_group in dp_groups:
+            shard_parallel_group, shard_replica_group = _create_shard_groups(dp_group, rank, shard_pieces)
+
+    else:
+        dp_group = _get_data_parallel_group()
+        shard_parallel_group, shard_replica_group = _create_shard_groups(dp_group, rank, shard_pieces)
+
+    return shard_parallel_group, shard_replica_group
+
+
+def _create_shard_groups(dp_group, rank, shard_pieces):
+    global _SHARD_PARALLEL_GROUP, _SHARD_REPLICA_GROUP
+
+    shard_parallel_lists = [
+        dp_group[i:i + shard_pieces] for i in range(0,
+                                                    len(dp_group),
+                                                    shard_pieces)
+    ]
+    shard_replica_lists = []
+    for i in range(shard_pieces):
+        shard_replica_list = [parallel_list[i] for parallel_list in shard_parallel_lists]
+        shard_replica_lists.append(shard_replica_list)
+
+    for shard_parallel_list in shard_parallel_lists:
+        shard_parallel_group = dist.new_group(ranks=shard_parallel_list)
+        if rank in shard_parallel_list:
+            _SHARD_PARALLEL_GROUP = shard_parallel_group
+
+    for shard_replica_list in shard_replica_lists:
+        shard_replica_group = dist.new_group(ranks=shard_replica_list)
+        if rank in shard_replica_list:
+            _SHARD_REPLICA_GROUP = shard_replica_group
+
+    return _SHARD_PARALLEL_GROUP, _SHARD_REPLICA_GROUP

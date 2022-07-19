@@ -38,6 +38,10 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
         self.max_reuse_distance = None
         self.gather_16bit_weights_on_model_save = None
 
+        # Partial sharding parameters
+        self.partial_sharding = None
+        self.shard_replicas = None
+
         self.ignore_unused_parameters = None
         self.round_robin_gradients = None
 
@@ -195,3 +199,12 @@ class DeepSpeedZeroConfig(DeepSpeedConfigObject):
             zero_config_dict,
             ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS,
             ZERO_OPTIMIZATION_ROUND_ROBIN_GRADIENTS_DEFAULT)
+
+        self.partial_sharding = get_scalar_param(
+            zero_config_dict,
+            ZERO_OPTIMIZATION_PARTIAL_SHARDING,
+            ZERO_OPTIMIZATION_PARTIAL_SHARDING_DEFAULT)
+
+        self.shard_replicas = get_scalar_param(zero_config_dict,
+                                               ZERO_OPTIMIZATION_SHARD_REPLICAS,
+                                               ZERO_OPTIMIZATION_SHARD_REPLICAS_DEFAULT)

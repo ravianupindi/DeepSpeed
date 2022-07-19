@@ -198,6 +198,8 @@ class DeepSpeedEngine(Module):
         self.collate_fn = collate_fn
         self.mpu = mpu
         self.data_parallel_group = None
+        self.shard_parallel_group = None
+        self.shard_replica_group = None
         self.global_steps = 0
         self.global_samples = 0
         self.micro_steps = 0
@@ -747,6 +749,12 @@ class DeepSpeedEngine(Module):
     def aio_config(self):
         return self._config.aio_config
 
+    def zero_partial_sharding(self):
+        return self._config.zero_config.partial_sharding
+
+    def zero_shard_replicas(self):
+        return self._config.zero_config.shard_replicas
+
     def _configure_lr_scheduler(self, client_lr_scheduler):
         # First check for scheduler in json configuration
         lr_scheduler = self._scheduler_from_config(self.optimizer)
@@ -1026,6 +1034,11 @@ class DeepSpeedEngine(Module):
         self.mp_world_size = groups._get_model_parallel_world_size()
         self.expert_parallel_group = groups._get_expert_parallel_group_dict()
         self.expert_data_parallel_group = groups._get_expert_data_parallel_group_dict()
+
+        if self.zero_partial_sharding():
+            shard_replicas = self.zero_shard_replicas()
+            assert self.dp_world_size % shard_replicas == 0, f"Shard replicas must be a factor of the data parallel degree"
+            self.shard_parallel_group, self.shard_replica_group = groups._get_shard_groups(shard_replicas)
 
         if not self.amp_enabled():
             self._broadcast_model()
