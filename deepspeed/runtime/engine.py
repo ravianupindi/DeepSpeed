@@ -1038,7 +1038,7 @@ class DeepSpeedEngine(Module):
         if self.zero_partial_sharding():
             shard_replicas = self.zero_shard_replicas()
             assert self.dp_world_size % shard_replicas == 0, f"Shard replicas must be a factor of the data parallel degree"
-            self.shard_parallel_group, self.shard_replica_group = groups._get_shard_groups(shard_replicas)
+            self.shard_parallel_group, self.shard_replica_group = groups._create_shard_groups(shard_replicas)
 
         if not self.amp_enabled():
             self._broadcast_model()
@@ -1373,6 +1373,7 @@ class DeepSpeedEngine(Module):
                 if self.has_moe_layers else None,
                 expert_data_parallel_group=self.expert_data_parallel_group
                 if self.has_moe_layers else None,
+                partial_sharding=self.zero_partial_sharding(),
                 reduce_scatter=self.zero_reduce_scatter(),
                 overlap_comm=overlap_comm,
                 cpu_offload=self.zero_cpu_offload(),
@@ -1424,6 +1425,7 @@ class DeepSpeedEngine(Module):
                     max_live_parameters=self.zero_max_live_parameters(),
                     param_persistence_threshold=self.zero_param_persistence_threshold(),
                     dp_process_group=self.data_parallel_group,
+                    partial_sharding=self.zero_partial_sharding(),
                     reduce_scatter=self.zero_reduce_scatter(),
                     overlap_comm=self.zero_overlap_comm(),
                     offload_optimizer_config=self.zero_offload_optimizer(),

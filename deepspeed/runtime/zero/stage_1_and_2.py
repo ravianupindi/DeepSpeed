@@ -20,7 +20,7 @@ from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION_GRADIENTS
 from deepspeed.runtime.zero.offload_constants import OFFLOAD_CPU_DEVICE, OFFLOAD_OPTIMIZER
 from deepspeed.ops.adam import DeepSpeedCPUAdam
 from deepspeed.ops.op_builder import UtilsBuilder
-from deepspeed.utils import logger
+from deepspeed.utils import logger, groups
 from deepspeed.moe.utils import is_moe_param
 from deepspeed.git_version_info import version
 from deepspeed.runtime.constants import PIPE_REPLICATED
@@ -112,6 +112,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  dp_process_group=None,
                  expert_parallel_group=None,
                  expert_data_parallel_group=None,
+                 partial_sharding=False,
                  reduce_scatter=True,
                  overlap_comm=False,
                  cpu_offload=False,
@@ -168,7 +169,15 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.device = torch.cuda.current_device() if not self.cpu_offload else 'cpu'
 
-        self.dp_process_group = dp_process_group
+        self.partial_sharding = partial_sharding
+
+        self.full_dp_process_group = dp_process_group
+
+        if self.partial_sharding:
+            self.dp_process_group = groups._get_shard_parallel_group()
+            self.shard_replica_group = groups._get_shard_replica_group()
+        else:
+            self.dp_process_group = dp_process_group
 
         #expert parallel group
         self.ep_process_group = expert_parallel_group
@@ -513,7 +522,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if dist.get_rank() == 0:
             logger.info(f"optimizer state initialized")
 
-        if dist.get_rank(group=self.dp_process_group) == 0:
+        if dist.get_rank(group=self.full_dp_process_group) == 0:
             see_memory_usage(f"After initializing ZeRO optimizer", force=True)
 
     def is_moe_group(self, group):
@@ -866,7 +875,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
     def gradient_reduction_w_predivide(self, tensor):
 
-        dp_world_size = dist.get_world_size(group=self.dp_process_group)
+        dp_world_size = dist.get_world_size(group=self.full_dp_process_group)
 
         tensor_to_allreduce = tensor
 
@@ -877,13 +886,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             if self.gradient_predivide_factor != 1.0:
                 tensor_to_allreduce.mul_(1. / self.gradient_predivide_factor)
 
-            dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
+            dist.all_reduce(tensor_to_allreduce, group=self.full_dp_process_group)
 
             if self.gradient_predivide_factor != dp_world_size:
                 tensor_to_allreduce.mul_(self.gradient_predivide_factor / dp_world_size)
         else:
             tensor_to_allreduce.div_(dp_world_size)
-            dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
+            dist.all_reduce(tensor_to_allreduce, group=self.full_dp_process_group)
 
         if self.communication_data_type != tensor.dtype and tensor is not tensor_to_allreduce:
             tensor.copy_(tensor_to_allreduce)
@@ -965,6 +974,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                 tensor.div_(dist.get_world_size(group=self.dp_process_group))
 
             async_handles = []
+            grad_slices = []
             for i, (dst, bucket_offset, numel) in enumerate(rank_and_offsets):
                 grad_slice = tensor.narrow(0, int(bucket_offset), int(numel))
                 # if dist.get_rank() == 0:
@@ -976,6 +986,18 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                                            dst=dst_rank,
                                            group=real_dp_process_group[i],
                                            async_op=True)
+                async_handles.append(async_handle)
+                grad_slices.append(grad_slice)
+
+            for handle in async_handles:
+                handle.wait()
+
+            async_handles = []
+
+            for i, grad_slice in enumerate(grad_slices):
+                async_handle = dist.all_reduce(grad_slice,
+                                               group=self.shard_replica_group,
+                                               async_op=True)
                 async_handles.append(async_handle)
 
             for handle in async_handles:
@@ -1351,17 +1373,19 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)
 
-        tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group))
+        tensor_to_allreduce.div_(dist.get_world_size(group=self.full_dp_process_group))
 
         if rank is None:
             #    "All Reducing"
-            dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
+            dist.all_reduce(tensor_to_allreduce, group=self.full_dp_process_group)
         else:
-            global_rank = dist.get_global_rank(self.dp_process_group, rank)
-            dist.reduce(tensor_to_allreduce, global_rank, group=self.dp_process_group)
+            global_rank = dist.get_global_rank(self.full_dp_process_group, rank)
+            dist.reduce(tensor_to_allreduce,
+                        global_rank,
+                        group=self.full_dp_process_group)
 
         if communication_data_type != tensor.dtype and tensor is not tensor_to_allreduce:
-            if rank is None or rank == dist.get_rank(group=self.dp_process_group):
+            if rank is None or rank == dist.get_rank(group=self.full_dp_process_group):
                 tensor.copy_(tensor_to_allreduce)
 
         return tensor
@@ -1384,7 +1408,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         with torch.cuda.stream(stream):
             allreduced = self.allreduce_bucket(small_bucket, rank=rank, log=log)
-            if rank is None or rank == dist.get_rank(group=self.dp_process_group):
+            if rank is None or rank == dist.get_rank(group=self.full_dp_process_group):
                 for buf, synced in zip(small_bucket, self.unflatten(allreduced, small_bucket)):
                     buf.copy_(synced)
 
@@ -1874,7 +1898,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             Since expert parallel process are a subset of data parallel process'''
             dist.all_reduce(overflow_gpu,
                             op=dist.ReduceOp.MAX,
-                            group=self.dp_process_group)
+                            group=self.full_dp_process_group)
 
         else:
             params = []

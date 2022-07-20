@@ -393,7 +393,7 @@ def _get_data_parallel_rank():
     return dist.get_rank(group=_get_data_parallel_group())
 
 
-def _get_shard_groups(shard_replicas):
+def _create_shard_groups(shard_replicas):
     global mpu
 
     rank = dist.get_rank()
@@ -422,7 +422,7 @@ def _get_shard_groups(shard_replicas):
     return shard_parallel_group, shard_replica_group
 
 
-def _create_shard_groups(dp_group, rank, shard_pieces):
+def _create_shard_groups_internal(dp_group, rank, shard_pieces):
     global _SHARD_PARALLEL_GROUP, _SHARD_REPLICA_GROUP
 
     shard_parallel_lists = [
@@ -446,3 +446,11 @@ def _create_shard_groups(dp_group, rank, shard_pieces):
             _SHARD_REPLICA_GROUP = shard_replica_group
 
     return _SHARD_PARALLEL_GROUP, _SHARD_REPLICA_GROUP
+
+
+def _get_shard_parallel_group():
+    return _SHARD_PARALLEL_GROUP
+
+
+def _get_shard_replica_group():
+    return _SHARD_REPLICA_GROUP
