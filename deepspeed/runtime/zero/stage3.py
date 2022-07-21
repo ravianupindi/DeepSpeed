@@ -172,7 +172,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                       max_live_parameters,
                                                       param_persistence_threshold,
                                                       offload_param_config,
-                                                      partial_sharding)
+                                                      mpu=mpu,
+                                                      partial_sharding=partial_sharding)
         self.persistent_parameters = self.parameter_offload.persistent_parameters
         self._configure_offloading(offload_optimizer_config, offload_param_config)
 
@@ -1189,7 +1190,9 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         grad_partitions_for_rank = reduce_scatter_coalesced(full_grads_for_rank,
                                                             self.dp_process_group)
 
-        dist.all_reduce(grad_partitions_for_rank, group=self.shard_replica_group)
+        if self.partial_sharding:
+            for grad_partition in grad_partitions_for_rank:
+                dist.all_reduce(grad_partition, group=self.shard_replica_group)
 
         if self.postscale_gradients and self.gradient_predivide_factor != dist.get_world_size(
                 self.real_dp_process_group):

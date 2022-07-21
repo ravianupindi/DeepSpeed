@@ -413,11 +413,11 @@ def _create_shard_groups(shard_replicas):
 
         dp_groups = topology.get_axis_comm_lists('data')
         for dp_group in dp_groups:
-            shard_parallel_group, shard_replica_group = _create_shard_groups(dp_group, rank, shard_pieces)
+            shard_parallel_group, shard_replica_group = _create_shard_groups_internal(dp_group, rank, shard_pieces)
 
     else:
-        dp_group = _get_data_parallel_group()
-        shard_parallel_group, shard_replica_group = _create_shard_groups(dp_group, rank, shard_pieces)
+        dp_group = [i for i in range(dist.get_world_size())]
+        shard_parallel_group, shard_replica_group = _create_shard_groups_internal(dp_group, rank, shard_pieces)
 
     return shard_parallel_group, shard_replica_group
 
