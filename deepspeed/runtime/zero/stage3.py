@@ -1178,6 +1178,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """average gradients and scatter partitions across ranks"""
         dtype = get_only_unique_item(p.grad.dtype for p in params_to_reduce)
 
+        print('Avg scatter grads called', flush=True)
         full_grads_for_rank = [p.grad for p in params_to_reduce]
         if self.communication_data_type == torch.float32:
             full_grads_for_rank = [g.float() for g in full_grads_for_rank]
@@ -1425,6 +1426,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                          communication_data_type=torch.float16,
                          rank=None,
                          log=None):
+
+        print('Allreduce_bucket called', flush=True)
         rank = None
         tensor = self.flatten(bucket)
 
@@ -1436,15 +1439,14 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if communication_data_type != tensor.dtype:
             tensor_to_allreduce = tensor.to(communication_data_type)
 
-        tensor_to_allreduce.div_(dist.get_world_size(group=self.real_dp_process_group))
+        tensor_to_allreduce.div_(dist.get_world_size(group=self.dp_process_group))
 
         if rank is None:
             #    "All Reducing"
-            dist.all_reduce(tensor_to_allreduce, group=self.real_dp_process_group)
+            dist.all_reduce(tensor_to_allreduce, group=self.dp_process_group)
         else:
             global_rank = dist.get_global_rank(self.dp_process_group, rank)
             dist.reduce(tensor_to_allreduce, global_rank, group=self.dp_process_group)
-            dist.all_reduce(tensor_to_allreduce, group=self.shard_replica_group)
 
         if communication_data_type != tensor.dtype and tensor is not tensor_to_allreduce:
             if rank is None or rank == dist.get_rank(group=self.dp_process_group):

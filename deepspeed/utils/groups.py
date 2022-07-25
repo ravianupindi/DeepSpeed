@@ -438,11 +438,17 @@ def _create_shard_groups_internal(dp_group, rank, shard_pieces):
     for shard_parallel_list in shard_parallel_lists:
         shard_parallel_group = dist.new_group(ranks=shard_parallel_list)
         if rank in shard_parallel_list:
+            logger.info('Rank = {} Shard parallel group = {}'.format(
+                rank,
+                shard_parallel_list))
             _SHARD_PARALLEL_GROUP = shard_parallel_group
 
     for shard_replica_list in shard_replica_lists:
         shard_replica_group = dist.new_group(ranks=shard_replica_list)
         if rank in shard_replica_list:
+            logger.info('Rank = {} Shard replica group = {}'.format(
+                rank,
+                shard_replica_list))
             _SHARD_REPLICA_GROUP = shard_replica_group
 
     return _SHARD_PARALLEL_GROUP, _SHARD_REPLICA_GROUP
