@@ -170,6 +170,9 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.device = torch.cuda.current_device() if not self.cpu_offload else 'cpu'
 
         self.partial_sharding = partial_sharding
+        if self.partial_sharding:
+            assert expert_parallel_group is None, f"ZeRO partial sharding does not currently support expert parallelism"
+            assert expert_data_parallel_group is None, f"ZeRO partial sharding does not currently support expert parallelism"
 
         self.full_dp_process_group = dp_process_group
 
@@ -191,8 +194,12 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         #For MoE models this maybe different for different param group
         #It will be modified during MoE setup later in the init
         self.real_dp_process_group = [
-            dp_process_group for i in range(len(self.optimizer.param_groups))
+            self.dp_process_group for i in range(len(self.optimizer.param_groups))
         ]
+
+        for group in self.real_dp_process_group:
+            assert dist.get_world_size(group=self.dp_process_group) == dist.get_world_size(group=group), f"Group sizes expected to match"
+
         self.partition_count = [dp_size for i in range(len(self.optimizer.param_groups))]
 
         self.is_gradient_accumulation_boundary = True
@@ -653,6 +660,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         for i, param_group in enumerate(self.round_robin_bit16_groups):
             total_partitions = dist.get_world_size(group=self.real_dp_process_group[i])
+            assert dist.get_world_size(group=self.dp_process_group) == dist.get_world_size(group=self.real_dp_process_group[i]), f"Group sizes expected to match"
 
             self.param_to_partition_ids[i] = {}
             self.is_partition_reduced[i] = {}
@@ -971,7 +979,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                     prev_id = partition_id
 
             if not self.ipg_bucket_has_moe_params:
-                tensor.div_(dist.get_world_size(group=self.dp_process_group))
+                tensor.div_(dist.get_world_size(group=self.full_dp_process_group))
 
             async_handles = []
             grad_slices = []
@@ -992,16 +1000,17 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
             for handle in async_handles:
                 handle.wait()
 
-            async_handles = []
+            if self.partial_sharding:
+                async_handles = []
 
-            for i, grad_slice in enumerate(grad_slices):
-                async_handle = dist.all_reduce(grad_slice,
-                                               group=self.shard_replica_group,
-                                               async_op=True)
-                async_handles.append(async_handle)
+                for i, grad_slice in enumerate(grad_slices):
+                    async_handle = dist.all_reduce(grad_slice,
+                                                   group=self.shard_replica_group,
+                                                   async_op=True)
+                    async_handles.append(async_handle)
 
-            for handle in async_handles:
-                handle.wait()
+                for handle in async_handles:
+                    handle.wait()
 
     ##############################################################################
     ############################# CPU Offload Methods#############################
