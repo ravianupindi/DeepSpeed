@@ -1178,7 +1178,6 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         """average gradients and scatter partitions across ranks"""
         dtype = get_only_unique_item(p.grad.dtype for p in params_to_reduce)
 
-        print('Avg scatter grads called', flush=True)
         full_grads_for_rank = [p.grad for p in params_to_reduce]
         if self.communication_data_type == torch.float32:
             full_grads_for_rank = [g.float() for g in full_grads_for_rank]
@@ -1189,7 +1188,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             ]
 
         grad_partitions_for_rank = reduce_scatter_coalesced(full_grads_for_rank,
-                                                            self.dp_process_group)
+                                                            self.dp_process_group,
+                                                            self.real_dp_process_group)
 
         if self.partial_sharding:
             for grad_partition in grad_partitions_for_rank:
