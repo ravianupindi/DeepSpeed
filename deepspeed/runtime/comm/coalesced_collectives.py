@@ -75,7 +75,12 @@ def reduce_scatter_coalesced(
         tensor_partition_flat_buffer = instrument_w_nvtx(
             torch.cat)(tensor_partitions_lst_with_padding)
 
-    predivide_factor = dist.get_world_size(dp_group)
+    predivide_factor = None
+    if dp_group is not None:
+        predivide_factor = dist.get_world_size(dp_group)
+    else:
+        predivide_factor = dist.get_world_size(group)
+
     tensor_partition_flat_buffer.div_(predivide_factor)  # pre-divide
     tensor_partition_buffer_for_each_rank: List[Tensor] = torch.chunk(
         tensor_partition_flat_buffer,
