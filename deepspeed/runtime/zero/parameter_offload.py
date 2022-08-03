@@ -6,6 +6,7 @@ Licensed under the MIT license.
 import torch
 from torch.cuda import Stream
 from collections import OrderedDict
+from deepspeed.utils import groups
 from deepspeed.runtime.utils import see_memory_usage
 from deepspeed.runtime.zero.partition_parameters import _init_external_params
 from deepspeed.runtime.zero.partition_parameters import *
@@ -174,7 +175,9 @@ class DeepSpeedZeRoOffload(object):
                  max_live_parameters=1000000000,
                  param_persistence_threshold=100000,
                  offload_param_config=None,
-                 mpu=None):
+                 mpu=None,
+                 partial_sharding=False,
+                 shard_replicas=1):
 
         see_memory_usage("TensorOffload initialize beginning", force=True)
 
@@ -190,7 +193,11 @@ class DeepSpeedZeRoOffload(object):
             self.offload_param_pin_memory = offload_param_config[
                 OFFLOAD_PARAM_PIN_MEMORY]
 
-        self._convert_to_zero_parameters(ds_config, module, mpu)
+        self._convert_to_zero_parameters(ds_config,
+                                         module,
+                                         mpu,
+                                         partial_sharding,
+                                         shard_replicas)
 
         for m in module.modules():
             _init_external_params(m)
@@ -238,7 +245,12 @@ class DeepSpeedZeRoOffload(object):
 
         return self.param_coordinators[training]
 
-    def _convert_to_zero_parameters(self, ds_config, module, mpu):
+    def _convert_to_zero_parameters(self,
+                                    ds_config,
+                                    module,
+                                    mpu,
+                                    partial_sharding,
+                                    shard_replicas):
         non_zero_params = [p for p in module.parameters() if not is_zero_param(p)]
         if non_zero_params:
             zero_params = [p for p in module.parameters() if is_zero_param(p)]
@@ -246,8 +258,11 @@ class DeepSpeedZeRoOffload(object):
                 zero_params[0].convert_to_zero_parameters(param_list=non_zero_params)
             else:
                 group = None
-                if mpu:
-                    group = mpu.get_data_parallel_group()
+                if partial_sharding:
+                    group = groups._get_shard_parallel_group(shard_replicas)
+                else:
+                    if mpu:
+                        group = mpu.get_data_parallel_group()
 
                 Init(module=module,
                      data_parallel_group=group,

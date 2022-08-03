@@ -772,6 +772,12 @@ class DeepSpeedEngine(Module):
     def aio_config(self):
         return self._config.aio_config
 
+    def zero_partial_sharding(self):
+        return self._config.zero_config.partial_sharding
+
+    def zero_shard_replicas(self):
+        return self._config.zero_config.shard_replicas
+
     def _configure_lr_scheduler(self, client_lr_scheduler):
         # First check for scheduler in json configuration
         lr_scheduler = self._scheduler_from_config(self.optimizer)
@@ -1384,6 +1390,8 @@ class DeepSpeedEngine(Module):
                 if self.has_moe_layers else None,
                 expert_data_parallel_group=self.expert_data_parallel_group
                 if self.has_moe_layers else None,
+                partial_sharding=self.zero_partial_sharding(),
+                shard_replicas=self.zero_shard_replicas(),
                 reduce_scatter=self.zero_reduce_scatter(),
                 overlap_comm=overlap_comm,
                 cpu_offload=self.zero_cpu_offload(),
@@ -1435,6 +1443,8 @@ class DeepSpeedEngine(Module):
                     max_live_parameters=self.zero_max_live_parameters(),
                     param_persistence_threshold=self.zero_param_persistence_threshold(),
                     dp_process_group=self.data_parallel_group,
+                    partial_sharding=self.zero_partial_sharding(),
+                    shard_replicas=self.zero_shard_replicas(),
                     reduce_scatter=self.zero_reduce_scatter(),
                     overlap_comm=self.zero_overlap_comm(),
                     offload_optimizer_config=self.zero_offload_optimizer(),

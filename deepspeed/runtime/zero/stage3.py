@@ -21,6 +21,7 @@ from torch.nn import Module
 from torch.nn.parameter import Parameter
 
 from deepspeed.runtime import ZeROOptimizer
+from deepspeed.utils import groups
 from deepspeed.utils.logging import logger
 from deepspeed.runtime.fp16.loss_scaler import LossScaler, DynamicLossScaler
 from deepspeed.runtime.comm.coalesced_collectives import reduce_scatter_coalesced
@@ -104,6 +105,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                  max_live_parameters=1000000000,
                  param_persistence_threshold=100000,
                  dp_process_group=None,
+                 partial_sharding=False,
+                 shard_replicas=1,
                  reduce_scatter=True,
                  overlap_comm=False,
                  offload_optimizer_config=None,
@@ -169,7 +172,10 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                       max_reuse_distance,
                                                       max_live_parameters,
                                                       param_persistence_threshold,
-                                                      offload_param_config)
+                                                      offload_param_config,
+                                                      mpu=mpu,
+                                                      partial_sharding=partial_sharding,
+                                                      shard_replicas=shard_replicas)
         self.persistent_parameters = self.parameter_offload.persistent_parameters
         self._configure_offloading(offload_optimizer_config, offload_param_config)
 
@@ -201,7 +207,18 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.reduce_scatter = reduce_scatter
 
-        self.dp_process_group = dp_process_group
+        self.partial_sharding = partial_sharding
+
+        self.real_dp_process_group = dp_process_group
+
+        self.shard_parallel_group = None
+        self.shard_replica_group = None
+
+        if self.partial_sharding:
+            self.dp_process_group = groups._get_shard_parallel_group(shard_replicas)
+            self.shard_replica_group = groups._get_shard_replica_group(shard_replicas)
+        else:
+            self.dp_process_group = dp_process_group
 
         self.partition_count = dist.get_world_size(group=self.dp_process_group)
 
@@ -353,7 +370,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         self.debug_fp16_grads = [{} for _ in self.fp16_groups]
 
-        if dist.get_rank(group=self.dp_process_group) == 0:
+        if dist.get_rank(group=self.real_dp_process_group) == 0:
             see_memory_usage(f"After initializing ZeRO optimizer", force=True)
 
     def destroy(self):
@@ -1173,10 +1190,15 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             ]
 
         grad_partitions_for_rank = reduce_scatter_coalesced(full_grads_for_rank,
-                                                            self.dp_process_group)
+                                                            self.dp_process_group,
+                                                            self.real_dp_process_group)
+
+        if self.partial_sharding:
+            for grad_partition in grad_partitions_for_rank:
+                dist.all_reduce(grad_partition, group=self.shard_replica_group)
 
         if self.postscale_gradients and self.gradient_predivide_factor != dist.get_world_size(
-                self.dp_process_group):
+                self.real_dp_process_group):
             grad_partitions_for_rank = [
                 g.mul(self.gradient_predivide_factor) for g in grad_partitions_for_rank
             ]
@@ -1406,6 +1428,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                          communication_data_type=torch.float16,
                          rank=None,
                          log=None):
+
+        print('Allreduce_bucket called', flush=True)
         rank = None
         tensor = self.flatten(bucket)
 
