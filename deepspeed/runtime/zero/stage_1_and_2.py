@@ -113,6 +113,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
                  expert_parallel_group=None,
                  expert_data_parallel_group=None,
                  partial_sharding=False,
+                 shard_replicas=1,
                  reduce_scatter=True,
                  overlap_comm=False,
                  cpu_offload=False,
@@ -171,14 +172,13 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
 
         self.partial_sharding = partial_sharding
         if self.partial_sharding:
-            assert expert_parallel_group is None, f"ZeRO partial sharding does not currently support expert parallelism"
-            assert expert_data_parallel_group is None, f"ZeRO partial sharding does not currently support expert parallelism"
+            assert has_moe_layers is False, f"ZeRO partial sharding does not currently support MoE"
 
         self.full_dp_process_group = dp_process_group
 
         if self.partial_sharding:
-            self.dp_process_group = groups._get_shard_parallel_group()
-            self.shard_replica_group = groups._get_shard_replica_group()
+            self.dp_process_group = groups._get_shard_parallel_group(shard_replicas)
+            self.shard_replica_group = groups._get_shard_replica_group(shard_replicas)
         else:
             self.dp_process_group = dp_process_group
 

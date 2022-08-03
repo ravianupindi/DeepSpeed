@@ -75,7 +75,7 @@ def reduce_scatter_coalesced(
         tensor_partition_flat_buffer = instrument_w_nvtx(
             torch.cat)(tensor_partitions_lst_with_padding)
 
-    predivide_factor = None
+    predivide_factor = 1.0
     if dp_group is not None:
         predivide_factor = dist.get_world_size(dp_group)
     else:

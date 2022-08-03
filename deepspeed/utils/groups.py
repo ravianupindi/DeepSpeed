@@ -400,8 +400,6 @@ def _create_shard_groups(shard_replicas):
     dp_size = _get_data_parallel_world_size()
     assert dp_size % shard_replicas == 0, "Another sanity check"
     shard_pieces = dp_size // shard_replicas
-    shard_parallel_group = None
-    shard_replica_group = None
 
     if mpu is not None:
         topology = None
@@ -413,13 +411,11 @@ def _create_shard_groups(shard_replicas):
 
         dp_groups = topology.get_axis_comm_lists('data')
         for dp_group in dp_groups:
-            shard_parallel_group, shard_replica_group = _create_shard_groups_internal(dp_group, rank, shard_pieces)
+            _create_shard_groups_internal(dp_group, rank, shard_pieces)
 
     else:
         dp_group = [i for i in range(dist.get_world_size())]
-        shard_parallel_group, shard_replica_group = _create_shard_groups_internal(dp_group, rank, shard_pieces)
-
-    return shard_parallel_group, shard_replica_group
+        _create_shard_groups_internal(dp_group, rank, shard_pieces)
 
 
 def _create_shard_groups_internal(dp_group, rank, shard_pieces):
@@ -451,12 +447,16 @@ def _create_shard_groups_internal(dp_group, rank, shard_pieces):
                 shard_replica_list))
             _SHARD_REPLICA_GROUP = shard_replica_group
 
-    return _SHARD_PARALLEL_GROUP, _SHARD_REPLICA_GROUP
 
+def _get_shard_parallel_group(shard_replicas=1):
+    if _SHARD_PARALLEL_GROUP is None:
+        _create_shard_groups(shard_replicas)
 
-def _get_shard_parallel_group():
     return _SHARD_PARALLEL_GROUP
 
 
-def _get_shard_replica_group():
+def _get_shard_replica_group(shard_replicas=1):
+    if _SHARD_REPLICA_GROUP is None:
+        _create_shard_groups(shard_replicas)
+
     return _SHARD_REPLICA_GROUP

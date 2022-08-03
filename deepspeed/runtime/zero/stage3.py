@@ -106,6 +106,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                  param_persistence_threshold=100000,
                  dp_process_group=None,
                  partial_sharding=False,
+                 shard_replicas=1,
                  reduce_scatter=True,
                  overlap_comm=False,
                  offload_optimizer_config=None,
@@ -173,7 +174,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                                                       param_persistence_threshold,
                                                       offload_param_config,
                                                       mpu=mpu,
-                                                      partial_sharding=partial_sharding)
+                                                      partial_sharding=partial_sharding,
+                                                      shard_replicas=shard_replicas)
         self.persistent_parameters = self.parameter_offload.persistent_parameters
         self._configure_offloading(offload_optimizer_config, offload_param_config)
 
@@ -213,8 +215,8 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.shard_replica_group = None
 
         if self.partial_sharding:
-            self.dp_process_group = groups._get_shard_parallel_group()
-            self.shard_replica_group = groups._get_shard_replica_group()
+            self.dp_process_group = groups._get_shard_parallel_group(shard_replicas)
+            self.shard_replica_group = groups._get_shard_replica_group(shard_replicas)
         else:
             self.dp_process_group = dp_process_group
 
