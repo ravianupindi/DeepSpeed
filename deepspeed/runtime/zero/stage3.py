@@ -239,9 +239,17 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         self.reduce_bucket_size = int(reduce_bucket_size)
 
         if self.reduce_scatter:
-            assert self.communication_data_type in (torch.float16, torch.bfloat16), f"ZeRO-3 supports only float16 or bfloat16 communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
+            assert self.communication_data_type in (torch.float16, torch.bfloat16, torch.float), f"ZeRO-3 supports only float16 or bfloat16 communication_data_type with reduce scatter enabled. Got: '{self.communication_data_type}'"
             assert self.gradient_predivide_factor == 1.0, "gradient_predivide_factor != 1.0 is not yet supported with ZeRO-2 with reduce scatter enabled"
             assert self.postscale_gradients, "pre-scale gradients is not yet supported with ZeRO-2 with reduce scatter enabled"
+
+        self.debug_changes = False
+        try:
+            self.debug_changes = os.environ['DEBUG_CHANGES'].lower() == 'true'
+        except KeyError:
+            logger.info(
+                'DEBUG_CHANGES environment variable not set, using default value of False'
+            )
 
         # Holds the mode parameter
         # The param.data may not hold any meaningful data
@@ -1178,6 +1186,7 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
     @instrument_w_nvtx
     def __avg_scatter_grads(self, params_to_reduce: List[Parameter]) -> List[Tensor]:
         """average gradients and scatter partitions across ranks"""
+
         dtype = get_only_unique_item(p.grad.dtype for p in params_to_reduce)
 
         full_grads_for_rank = [p.grad for p in params_to_reduce]
@@ -1189,10 +1198,24 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
                 g.div(self.gradient_predivide_factor) for g in full_grads_for_rank
             ]
 
+        if self.debug_changes:
+            norm_groups = []
+            norm_groups.append(
+                self.get_grad_norm_direct(full_grads_for_rank,
+                                          params_to_reduce))
+            scaled_grad_norm = get_global_norm(norm_list=norm_groups)
+            print('AvgScatterGrads entry, computed grad_norm before reduction={}'.format(
+                scaled_grad_norm),
+                  flush=True)
+
+        # for g in full_grads_for_rank:
+        #     print(f'FULLGRADS - Gradient = {g} Size {g.size()}')
+        # reduce scatter on 0,1
         grad_partitions_for_rank = reduce_scatter_coalesced(full_grads_for_rank,
                                                             self.dp_process_group,
                                                             self.real_dp_process_group)
 
+        # allreduce on 0,2
         if self.partial_sharding:
             for grad_partition in grad_partitions_for_rank:
                 dist.all_reduce(grad_partition, group=self.shard_replica_group)
@@ -1205,6 +1228,22 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
 
         if self.communication_data_type == torch.float32:
             grad_partitions_for_rank = [g.to(dtype) for g in grad_partitions_for_rank]
+
+        if self.debug_changes:
+            grad_norms = []
+            for g in grad_partitions_for_rank:
+                grad_norms.append(g.cuda(non_blocking=True).double().norm(2))
+
+            # emulating the grad_norm_direct function
+            total_norm_cuda = torch.sum(torch.pow(torch.stack(grad_norms), 2))
+            norm_type = 2
+            total_norm = total_norm_cuda.item()**(1. / norm_type)
+            norm_groups = []
+            norm_groups.append(total_norm)
+            scaled_grad_norm = get_global_norm(norm_list=norm_groups)
+            print('AvgScatterGrads exit, computed grad_norm after reduction={}'.format(
+                scaled_grad_norm),
+                  flush=True)
 
         return grad_partitions_for_rank
 
@@ -1587,12 +1626,16 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         if norm_type == inf:
             total_norm = max(g.data.abs().max() for g in gradients)
             total_norm_cuda = torch.cuda.FloatTensor([float(total_norm)])
-            dist.all_reduce(total_norm_cuda,
-                            op=dist.ReduceOp.MAX,
-                            group=self.dp_process_group)
 
-            # Take max across all GPUs.
-            self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.MAX)
+            if not self.debug_changes:
+                dist.all_reduce(total_norm_cuda,
+                                op=dist.ReduceOp.MAX,
+                                group=self.dp_process_group)
+
+                # Take max across all GPUs.
+                self._model_parallel_all_reduce(tensor=total_norm_cuda,
+                                                op=dist.ReduceOp.MAX)
+
             total_norm = total_norm_cuda[0].item()
         else:
             # if dist.get_rank() == 0:
@@ -1605,11 +1648,13 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
             # Sum across all model parallel GPUs.
             total_norm_cuda = torch.sum(torch.pow(torch.stack(grad_norms), 2))
 
-            dist.all_reduce(total_norm_cuda,
-                            op=dist.ReduceOp.SUM,
-                            group=self.dp_process_group)
+            if not self.debug_changes:
+                dist.all_reduce(total_norm_cuda,
+                                op=dist.ReduceOp.SUM,
+                                group=self.dp_process_group)
 
-            self._model_parallel_all_reduce(tensor=total_norm_cuda, op=dist.ReduceOp.SUM)
+                self._model_parallel_all_reduce(tensor=total_norm_cuda,
+                                                op=dist.ReduceOp.SUM)
 
             total_norm = total_norm_cuda.item()**(1. / norm_type)
 
@@ -1937,9 +1982,12 @@ class DeepSpeedZeroOptimizer_Stage3(ZeROOptimizer):
         timer_names.add('optimizer_step')
         self.start_timers(['optimizer_step'])
 
+        # print(f'Pre step global grad_norm = {self._global_grad_norm}')
+        # for i, _ in enumerate(self.fp16_groups):
+        #     for grad in self.averaged_gradients[i]:
+        #         print(f'Averaged gradient for Group{i} is {grad}')
         #update parameters one sub group at a time
         for sub_group_id, group in enumerate(self.fp16_groups):
-
             #prepare optimizer states, gradients and fp32 parameters for update
             self._prepare_sub_group(sub_group_id, timer_names)
 

@@ -171,6 +171,7 @@ class DeepSpeedZeroOptimizer(ZeROOptimizer):
         self.device = torch.cuda.current_device() if not self.cpu_offload else 'cpu'
 
         self.partial_sharding = partial_sharding
+        # move this to config file - check for conflicting scenarios
         if self.partial_sharding:
             assert has_moe_layers is False, f"ZeRO partial sharding does not currently support MoE"
 

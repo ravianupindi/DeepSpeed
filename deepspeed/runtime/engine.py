@@ -928,6 +928,7 @@ class DeepSpeedEngine(Module):
         return expected_optim_types
 
     # Validate configuration based on command line arguments
+    # maybe add moe check here
     def _do_sanity_check(self):
         expected_optim_types = self._supported_optims()
         expected_optim_types += [type(None), Callable]
@@ -1346,7 +1347,7 @@ class DeepSpeedEngine(Module):
     def _configure_zero_optimizer(self, optimizer):
         zero_stage = self.zero_optimization_stage()
         log_dist('Creating fp16 ZeRO stage {} optimizer'.format(zero_stage), ranks=[0])
-        assert self.communication_data_type in (torch.float16, torch.bfloat16), "ZeRO supports only 'communication_data_type': ['fp16', 'bfp16']"
+        assert self.communication_data_type in (torch.float16, torch.bfloat16, torch.float), "ZeRO supports only 'communication_data_type': ['fp16', 'bfp16', 'fp32']"
         timers = self.timers if self.wall_clock_breakdown() else None
 
         if optimizer is None:
