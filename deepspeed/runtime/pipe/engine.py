@@ -41,7 +41,6 @@ mem_cached = 0
 def _tensor_bytes(tensor):
     return tensor.numel() * tensor.element_size()
 
-
 class PipelineEngine(DeepSpeedEngine):
     """ A training engine hybrid pipeline, data, and model parallel training.
 
@@ -111,6 +110,16 @@ class PipelineEngine(DeepSpeedEngine):
         # Partition input/output buffers
         self.is_pipe_partitioned = self.is_model_parallel
         self.is_grad_partitioned = False
+
+        self._singularity_elasticity_enabled = False
+        try:
+            from torch._utils import _get_singularity_elasticity_flag
+            self._singularity_elasticity_enabled = _get_singularity_elasticity_flag()
+        except:
+            print(f'AISC_CTR:ERROR|DeepSpeed|Cannot find singularity pytorch function(s). DeepSpeed related patches will be disabled')
+        
+        self._disable_loss_aggregation = os.environ.get('DEEPSPEED_DISABLE_LOSS_AGGREGATION', "false").lower() == "true"
+        self._free_forward_output = os.environ.get('DEEPSPEED_FREE_FORWARD_OUTPUT', "false").lower() == "true"
 
         model_parameters = filter(lambda p: p.requires_grad, self.module.parameters())
         num_params = sum([p.numel() for p in model_parameters])
@@ -401,8 +410,10 @@ class PipelineEngine(DeepSpeedEngine):
             agg_loss = self.dp_group_loss.clone().detach()
             #print(f'RANK={self.global_rank} bcast SENDER src={self.global_rank} group={self.grid.pp_group}', flush=True)
             if self.is_data_parallel:
-                dist.all_reduce(agg_loss, group=self.mpu.get_data_parallel_group())
-                agg_loss /= self.dp_world_size
+                # We do not invoke this aggregate allreduce in elastic training- hurts perf
+                if not (self._singularity_elasticity_enabled or self._disable_loss_aggregation):
+                    dist.all_reduce(agg_loss, group=self.mpu.get_data_parallel_group())
+                    agg_loss /= self.dp_world_size
 
             assert self.global_rank in self.grid.pp_group
             losses = torch.Tensor([self.dp_group_loss, agg_loss]).to(self.device)
@@ -557,6 +568,12 @@ class PipelineEngine(DeepSpeedEngine):
         # mechanisms.
         if self.is_last_stage():
             super().backward(self.loss)
+            # Singularity - Free the outputs of the forward pass
+            # DeepSpeed does this in every pipe stage except the last pipe stage
+            # Without this line, the buffer is alive going into the next minibatch until the
+            # outputs of the next forward pass are stored
+            if self._free_forward_output:
+                self.pipe_buffers['outputs'][buffer_id] = None
             self.mem_status('AFTER BWD')
             return
 

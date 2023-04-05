@@ -9,6 +9,7 @@ from deepspeed.runtime.utils import get_grad_norm, CheckOverflow
 from deepspeed.runtime.zero.config import ZERO_OPTIMIZATION_OPTIMIZER_STATES
 from deepspeed.utils import logger, log_dist
 from deepspeed.ops.op_builder import UtilsBuilder
+from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology as Topology
 
 
 def get_alignment_padding(flattened_lean_size, sub_partition_id, sub_partition_size):
@@ -94,9 +95,51 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         if not torch.cuda.is_available:
             raise SystemError("Cannot use fp16 without CUDA.")
         self.optimizer = init_optimizer
-
         self.verbose = verbose
-        self.dp_process_group = dp_process_group
+
+        self._singularity_elasticity_enabled = False
+        try:
+            from torch._utils import _get_singularity_elasticity_flag
+            self._singularity_elasticity_enabled = _get_singularity_elasticity_flag()
+        except:
+            print(f'AISC_CTR:ERROR|DeepSpeed|Cannot find singularity pytorch function(s). DeepSpeed related patches will be disabled')
+
+        # When we use deepspeed optimizer with elastic training, make sure we disable optimizer step event tracking
+        # inside pytorch optimizer.py
+        if self._singularity_elasticity_enabled:
+            try:
+                self.optimizer.disable_singularity_step()
+            except:
+                raise SystemError("AISC_CTR:ERROR|DeepSpeed|Cannot use elasticity without singularity pytorch patches")
+
+            # Construct a process group for use in ZeRO sharding
+            pipe_size = int(os.environ['SINGULARITY_PARALLELISM_POLICY_PIPE'])
+            dp_size = int(os.environ['SINGULARITY_PARALLELISM_POLICY_DATA'])
+            mp_size = int(os.environ['SINGULARITY_PARALLELISM_POLICY_MODEL'])
+
+            topology = Topology(pipe_size, mp_size, dp_size)
+            dp_groups = topology.get_axis_comm_lists('data')
+            shard_degree = int(os.environ['ZERO_SHARDING_DEGREE'])
+            assert dp_size % shard_degree == 0, "Sharding degree must be a factor of  data parallel dimension size"
+            shard_replicas = dp_size // shard_degree
+
+            global_rank = dist.get_rank()
+            shard_process_group=None
+
+            for dp_group in dp_groups:
+                shard_lists = [dp_group[i::shard_replicas] for i in range(0,len(dp_group)) if len(dp_group[i::shard_replicas]) == shard_degree]
+ 
+                for shard_list in shard_lists:
+                    process_group = dist.new_group(ranks=shard_list)
+                    if global_rank in shard_list:
+                        shard_process_group = process_group
+ 
+            self.dp_process_group = shard_process_group
+
+        else:
+            self.dp_process_group = dp_process_group
+
+        self.real_dp_process_group = dp_process_group
 
         # TODO: automatically turn off if #params > some_limit
         self.all_gather_partitions = all_gather_partitions
@@ -258,6 +301,21 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                                               zero_reduce_scatter=True)
 
         self._initialize_optimizer_states()
+
+        self._singularity_device_proxy = None
+        if self._singularity_elasticity_enabled:
+            try:
+                import os
+                singularity_device_proxy_path = os.environ['SINGULARITY_DEVICE_PROXY_LIB_PATH']
+            except:
+                raise SystemError("AISC_CTR:ERROR|DeepSpeed|Cannot use elasticity without SINGULARITY_DEVICE_PROXY_LIB_PATH specified")
+
+            try:
+                # In singularity we need to know when step is called.
+                from ctypes import cdll
+                self._singularity_device_proxy = cdll.LoadLibrary(singularity_device_proxy_path)
+            except:
+                raise SystemError("AISC_CTR:ERROR|DeepSpeed|Unable to find device proxy")
 
     def _initialize_optimizer_states(self):
         for group_idx, group in enumerate(self.local_sub_partitions_of_fp32_groups):
@@ -650,6 +708,12 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
             #TODO RS: update get grad norm to support sub partitions
             norm_groups.append(get_grad_norm(group, mpu=self.mpu))
 
+        # For elastic training with models using DeepSpeed, we replace the pre and post optimizer events
+        # required for squashing validation checks to go through
+        if self._singularity_elasticity_enabled and self._singularity_device_proxy:
+            self._singularity_device_proxy.PreOptimizerStepEvent()
+
+        for i, group in enumerate(self.fp16_groups):
             #RS: update free grads w.r.t. sub partitions
             #free gradients for all the parameters that are not updated by this process
             self.free_grad_in_param_list(self.params_not_local[i])
@@ -709,6 +773,9 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
                                             self.fp16_groups[i])
             for p, q in zip(self.fp16_groups[i], updated_params):
                 p.data = q.data
+
+        if self._singularity_elasticity_enabled and self._singularity_device_proxy:
+            self._singularity_device_proxy.PostOptimizerStepEvent()
 
         return self.overflow
 

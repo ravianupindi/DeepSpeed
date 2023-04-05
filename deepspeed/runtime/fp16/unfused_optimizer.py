@@ -38,7 +38,22 @@ class FP16_UnfusedOptimizer(object):
 
         if not torch.cuda.is_available:
             raise SystemError("Cannot use fp16 without CUDA.")
+        
+        self._singularity_elasticity_enabled = False
+        try:
+            from torch._utils import _get_singularity_elasticity_flag
+            self._singularity_elasticity_enabled = _get_singularity_elasticity_flag()
+        except:
+            print(f'AISC_CTR:ERROR|DeepSpeed|Cannot find singularity pytorch function(s). DeepSpeed related patches will be disabled')
+
         self.optimizer = init_optimizer
+        # When we use deepspeed optimizer in elastic training make sure we disable optimizer step event tracking
+        # inside pytorch optimizer.py
+        if self._singularity_elasticity_enabled:
+            try:
+                self.optimizer.disable_singularity_step()
+            except:
+                raise SystemError("AISC_CTR:ERROR|DeepSpeed|Cannot use elasticity without singularity pytorch patches")
 
         # param groups
         self.fp16_groups = []
@@ -102,6 +117,21 @@ class FP16_UnfusedOptimizer(object):
                                               deepspeed=deepspeed)
 
         self.initialize_optimizer_states()
+
+        self._singularity_device_proxy = None
+        if self._singularity_elasticity_enabled:
+            try:
+                import os
+                singularity_device_proxy_path = os.environ['SINGULARITY_DEVICE_PROXY_LIB_PATH']
+            except:
+                raise SystemError("AISC_CTR:ERROR|DeepSpeed|Cannot use elasticity without SINGULARITY_DEVICE_PROXY_LIB_PATH specified")
+
+            try:
+                # In singularity we need to know when step is called.
+                from ctypes import cdll
+                self._singularity_device_proxy = cdll.LoadLibrary(singularity_device_proxy_path)
+            except:
+                raise SystemError("AISC_CTR:ERROR|DeepSpeed|Unable to find device proxy")
 
     def zero_grad(self, set_grads_to_None=True):
         """
@@ -189,16 +219,25 @@ class FP16_UnfusedOptimizer(object):
 
         self.unscale_and_clip_grads(norm_groups)
 
+        # For elastic training with models using DeepSpeed, we replace the pre and post optimizer events
+        # required for squashing validation checks to go through
+        if self._singularity_elasticity_enabled and self._singularity_device_proxy:
+            self._singularity_device_proxy.PreOptimizerStepEvent()
+
         self.optimizer.step()
 
         for fp32_group, fp16_group in zip(self.fp32_groups, self.fp16_groups):
             for fp32_param, fp16_param in zip(fp32_group, fp16_group):
 
                 #remove the fp32 grad
-                fp32_param.grad = None
+                if not self._singularity_elasticity_enabled:
+                    fp32_param.grad = None
 
                 #copy data from fp32 to fp16
                 fp16_param.data.copy_(fp32_param.data)
+
+        if self._singularity_elasticity_enabled and self._singularity_device_proxy:
+            self._singularity_device_proxy.PostOptimizerStepEvent()
 
         return self.overflow
 

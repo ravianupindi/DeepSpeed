@@ -48,6 +48,12 @@ from ..ops.adam import FusedAdam
 from deepspeed.profiling.flops_profiler.profiler import FlopsProfiler
 
 MEMORY_OPT_ALLREDUCE_SIZE = 500000000
+try:
+    from torch._utils import _get_singularity_elasticity_flag
+    if _get_singularity_elasticity_flag():
+        MEMORY_OPT_ALLREDUCE_SIZE = 4000000000
+except:
+    print(f'AISC_CTR:ERROR|DeepSpeed|Cannot find singularity pytorch function(s). DeepSpeed related patches will be disabled')
 
 try:
     from apex import amp
@@ -1280,7 +1286,7 @@ class DeepSpeedEngine(Module):
         for buf, synced in zip(small_bucket, self.unflatten(allreduced, small_bucket)):
             buf.copy_(synced)
 
-    def allreduce_no_retain(self, bucket, numel_per_bucket=500000000):
+    def allreduce_no_retain(self, bucket, numel_per_bucket=MEMORY_OPT_ALLREDUCE_SIZE):
         small_bucket = []
         numel = 0
         for tensor in bucket:
@@ -1293,7 +1299,7 @@ class DeepSpeedEngine(Module):
         if len(small_bucket) > 0:
             self.allreduce_and_copy(small_bucket)
 
-    def buffered_allreduce_fallback(self, grads=None, elements_per_buffer=500000000):
+    def buffered_allreduce_fallback(self, grads=None, elements_per_buffer=MEMORY_OPT_ALLREDUCE_SIZE):
         grads = []
         for param_name, param in self.module.named_parameters():
             if param.grad is None:
