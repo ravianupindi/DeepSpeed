@@ -119,7 +119,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
 
             topology = Topology(pipe_size, mp_size, dp_size)
             dp_groups = topology.get_axis_comm_lists('data')
-            shard_degree = int(os.environ['ZERO_SHARDING_DEGREE'])
+            shard_degree = int(os.environ['SINGULARITY_ZERO_SHARDING_DEGREE'])
             assert dp_size % shard_degree == 0, "Sharding degree must be a factor of  data parallel dimension size"
             shard_replicas = dp_size // shard_degree
 
@@ -128,12 +128,12 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
 
             for dp_group in dp_groups:
                 shard_lists = [dp_group[i::shard_replicas] for i in range(0,len(dp_group)) if len(dp_group[i::shard_replicas]) == shard_degree]
- 
+
                 for shard_list in shard_lists:
                     process_group = dist.new_group(ranks=shard_list)
                     if global_rank in shard_list:
                         shard_process_group = process_group
- 
+
             self.dp_process_group = shard_process_group
 
         else:
