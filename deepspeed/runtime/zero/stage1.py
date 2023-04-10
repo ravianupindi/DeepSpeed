@@ -306,7 +306,6 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
         self._singularity_device_proxy = None
         if self._singularity_elasticity_enabled:
             try:
-                import os
                 singularity_device_proxy_path = os.environ['SINGULARITY_DEVICE_PROXY_LIB_PATH']
             except:
                 raise SystemError("AISC_CTR:ERROR|DeepSpeed|Cannot use elasticity without SINGULARITY_DEVICE_PROXY_LIB_PATH specified")
