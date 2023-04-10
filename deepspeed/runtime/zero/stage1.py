@@ -116,7 +116,7 @@ class FP16_DeepSpeedZeroOptimizer_Stage1(object):
             # Construct a process group for use in ZeRO sharding
             pipe_size = int(os.environ['SINGULARITY_PARALLELISM_POLICY_PIPE'])
             dp_size = int(os.environ['SINGULARITY_PARALLELISM_POLICY_DATA'])
-            mp_size = int(os.environ['SINGULARITY_PARALLELISM_POLICY_MODEL'])
+            mp_size = int(os.environ['SINGULARITY_PARALLELISM_POLICY_TENSOR'])
 
             topology = Topology(pipe_size, mp_size, dp_size)
             dp_groups = topology.get_axis_comm_lists('data')
